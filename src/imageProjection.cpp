@@ -395,10 +395,255 @@ class ImageProjection : public ParamServer{
 
       if (odomQueue.front().header.stamp.toSec() > timeScanCur)
         return;
+
+      // 获取开始时刻的odom信息
+      nav_msgs::Odometry startOdomMsg;
+
+      for(int i = 0; i < (int)odomQueue.size(); ++i){
+        startOdomMsg = odomQueue[i];
+        if (ROS_TIME(&startOdomMsg) < timeScanCur)
+          continue;
+        else
+            break;
+      }
+
+      tf::Quaternion orientation;
+      tf::quaternionMsgToTF(startOdomMsg.pose.pose.orientation, orientation); // 将当前扫描帧初始时刻的odom的位姿转化为四元数
+
+      double roll, pitch, yaw;
+      tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw); // 将四元数转换为欧拉角
+
+      // 计算odom的旋转量
+      cloudInfo.initialGuessX = startOdomMsg.pose.pose.position.x;
+      cloudInfo.initialGuessY = startOdomMsg.pose.pose.position.y;
+      cloudInfo.initialGuessZ = startOdomMsg.pose.pose.position.z;
+      cloudInfo.odomRollInit = roll;
+      cloudInfo.odomPitchInit = pitch;
+      cloudInfo.odomYawInit = yaw;
+
+      cloudInfo.odomAvailable = true;
+
+      // 获得结尾时刻的odom信息
+      odomDeskewFlag = false;
+      if(odom.back().header.stamp.toSec() < timeScanEnd) return;
+
+      nav_msgs::Odometry endOdomMsg;
+      for (int i = 0; i < (int)odomQueue.size(); ++i)
+      {
+          endOdomMsg = odomQueue[i];
+
+          if (ROS_TIME(&endOdomMsg) < timeScanEnd)
+              continue;
+          else
+              break;
+      }
+
+      if(int(round(startOdomMsg.pose.convariance[0])) != int(round(endOdomMsg.pose.convariance[0]))) return;
+
+      Eigen::Affine3d transBegin = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z, roll, pitch, yaw);
+      
+      tf::quaternionMsgToTF(endOdomMsg.pose.pose.orientation, orientation);
+      tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
+      Eigen::Affine3f transEnd = pcl::getTransformation(endOdomMsg.pose.pose.position.x, endOdomMsg.pose.pose.position.y, endOdomMsg.pose.pose.position.z, roll, pitch, yaw);
+
+      Eigen::Affine3f transBt = transBegin.inverse() * transEnd; // 计算两次odom之间的变换矩阵
+      
+      float rollIncre, pitchIncre, yawIncre; // 计算两次odom之间的旋转量
+      pcl::getTranslationAndEulerAngles(transBt, cloudInfo.odomXIncr, cloudInfo.odomYIncr, cloudInfo.odomZIncr, rollIncre, pitchIncre, yawIncre); // 计算两次odom之间的平移量和旋转量
+
+      odomDeskewFlag = true;      
     }
 
 
+    void findRotation(double pointTime, float* rotXCur, float* rotYCur, float* rotZCur){
+      // 根据点的扫描时间，从imu的queue中进行插值寻找最近的imu的信息
+      // 找到scan的point的前后两个点的imu的信息
+      // imuPointerFront是当前lidar的后一个点的信息
+      // imuPointerFrot - 1 是当前lidar的前一个点的信息
+      *rotXCur = 0;
+      *rotYCur = 0;
+      *rotZCur = 0;
+
+      int imuPointerFront = 0;
+      while(imuPointerFront < imuPointerCur){
+        // 遍历imu的队列，找到最近的imu信息
+        if(pointTime < imuTime[imuPointerFront]){
+          break;
+        }
+        ++imuPointerFront;
+      }
 
 
+      if(pointTime > imuTime[imuPointerFront] || imuPointerFront == 0){
+        // 该点时间比 IMU 最后一个还晚（即已经超出范围）
+        // 该点比第一个还早（没有前一个可插值)
+        *rotXCur = imuRotX[imuPointerFront];
+        *rotYCur = imuRotY[imuPointerFront];
+        *rotZCur = imuRotZ[imuPointerFront];
+      }
+      else{
+        int imuPointerBack = imuPointerFront - 1;
+        double ratioFront = (pointTime - imuTime[imuPointerBack]) / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+        double ratioBack = (imuTime[imuPointerFront] - pointTime) / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+        *rotXCur = imuRotX[imuPointerFront] * ratioFront + imuRotX[imuPointerBack] * ratioBack;
+        *rotYCur = imuRotY[imuPointerFront] * ratioFront + imuRotY[imuPointerBack] * ratioBack;
+        *rotZCur = imuRotZ[imuPointerFront] * ratioFront + imuRotZ[imuPointerBack] * ratioBack;
+      }
+    }
 
+    void findPosition(double relTime, float *posXCur, float *posYCur, float *posZCur)
+    {
+        *posXCur = 0; *posYCur = 0; *posZCur = 0;
+
+        // If the sensor moves relatively slow, like walking speed, positional deskew seems to have little benefits. Thus code below is commented.
+
+        // if (cloudInfo.odomAvailable == false || odomDeskewFlag == false)
+        //     return;
+
+        // float ratio = relTime / (timeScanEnd - timeScanCur);
+
+        // *posXCur = ratio * odomIncreX;
+        // *posYCur = ratio * odomIncreY;
+        // *posZCur = ratio * odomIncreZ;
+    }
+
+    PointType deskewPoint(PointType* point, double relTime){
+      // 进行点云的去畸变
+      // 将每一时刻的点重新投影到开始扫描时刻的点
+
+      // 判断点云是否能够去畸变
+      if (deskewFlag == -1 || cloudInfo.imuAvailable == false)
+            return *point;
+
+      double pointTime = timeScanCur + relTime; // 计算当前点的扫描时间
+      float rotXCur, rotYCur, rotZCur;
+      findRotation(pointTime, &rotXCur, &rotYCur, &rotZCur); // 根据当前点的扫描时间，找到对应的imu的旋转量
+
+      float posXCur, posYCur, posZCur;
+      findPosition(relTime, &posXCur, &posYCur, &posZCur); // 根据当前点的扫描时间，找到对应的odom的平移量
+
+      if(fisrtPointFlag == true){
+        // 如果是第一个点，则将当前的旋转量和平移量设置为初始值
+        transStartInverse = (pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur)).inverse();
+        firstPointFlag = false;
+      }
+
+      // 将当前点投影到开始点
+      Eigen::Affine3f transFinal = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur); //  计算该点的位姿
+      Eigen::Affine3f transBt = transStartInverse * transFinal; // 计算该点相对于开始点的位姿
+
+      // 将插值之后的点投影到开始时刻
+      PointType newPoint;
+      newPoint.x = transBt(0,0) * point->x + transBt(0,1) * point->y + transBt(0,2) * point->z + transBt(0,3);
+      newPoint.y = transBt(1,0) * point->x + transBt(1,1) * point->y + transBt(1,2) * point->z + transBt(1,3);
+      newPoint.z = transBt(2,0) * point->x + transBt(2,1) * point->y + transBt(2,2) * point->z + transBt(2,3);
+      newPoint.intensity = point->intensity;
+
+      return newPoint;
+    }
+
+
+    // 需要重新复现
+
+    void projectPointCloud()
+    {
+        int cloudSize = laserCloudIn->points.size();
+        // range image projection
+        for (int i = 0; i < cloudSize; ++i)
+        {
+            PointType thisPoint;
+            thisPoint.x = laserCloudIn->points[i].x;
+            thisPoint.y = laserCloudIn->points[i].y;
+            thisPoint.z = laserCloudIn->points[i].z;
+            thisPoint.intensity = laserCloudIn->points[i].intensity;
+
+            float range = pointDistance(thisPoint);
+            if (range < lidarMinRange || range > lidarMaxRange)
+                continue;
+
+            int rowIdn = laserCloudIn->points[i].ring;
+            if (rowIdn < 0 || rowIdn >= N_SCAN)
+                continue;
+
+            if (rowIdn % downsampleRate != 0)
+                continue;
+
+            int columnIdn = -1;
+            if (sensor == SensorType::VELODYNE || sensor == SensorType::OUSTER)
+            {
+                float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
+                static float ang_res_x = 360.0/float(Horizon_SCAN);
+                columnIdn = -round((horizonAngle-90.0)/ang_res_x) + Horizon_SCAN/2;
+                if (columnIdn >= Horizon_SCAN)
+                    columnIdn -= Horizon_SCAN;
+            }
+            else if (sensor == SensorType::LIVOX)
+            {
+                columnIdn = columnIdnCountVec[rowIdn];
+                columnIdnCountVec[rowIdn] += 1;
+            }
+            
+            if (columnIdn < 0 || columnIdn >= Horizon_SCAN)
+                continue;
+
+            if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
+                continue;
+
+            thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
+
+            rangeMat.at<float>(rowIdn, columnIdn) = range;
+
+            int index = columnIdn + rowIdn * Horizon_SCAN;
+            fullCloud->points[index] = thisPoint;
+        }
+    }
+
+    void cloudExtraction()
+    {
+        int count = 0;
+        // extract segmented cloud for lidar odometry
+        for (int i = 0; i < N_SCAN; ++i)
+        {
+            cloudInfo.startRingIndex[i] = count - 1 + 5;
+
+            for (int j = 0; j < Horizon_SCAN; ++j)
+            {
+                if (rangeMat.at<float>(i,j) != FLT_MAX)
+                {
+                    // mark the points' column index for marking occlusion later
+                    cloudInfo.pointColInd[count] = j;
+                    // save range info
+                    cloudInfo.pointRange[count] = rangeMat.at<float>(i,j);
+                    // save extracted cloud
+                    extractedCloud->push_back(fullCloud->points[j + i*Horizon_SCAN]);
+                    // size of extracted cloud
+                    ++count;
+                }
+            }
+            cloudInfo.endRingIndex[i] = count -1 - 5;
+        }
+    }
+    
+    void publishClouds()
+    {
+        cloudInfo.header = cloudHeader;
+        cloudInfo.cloud_deskewed  = publishCloud(pubExtractedCloud, extractedCloud, cloudHeader.stamp, lidarFrame);
+        pubLaserCloudInfo.publish(cloudInfo);
+    }
+
+}；
+
+
+int main(int argc, char** argv)
+{
+    ros::init(argc, argv, "lio_sam");
+
+    ImageProjection IP;
+    
+    ROS_INFO("\033[1;32m----> Image Projection Started.\033[0m");
+
+    ros::MultiThreadedSpinner spinner(3);
+    spinner.spin();
+    
+    return 0;
 }
