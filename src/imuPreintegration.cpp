@@ -315,7 +315,12 @@ public:
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
     {   
         // 将激光雷达里程计（低频、高精度）与 IMU（高频、有漂移）进行紧耦合图优化，输出高精度、高频、全局一致的状态估计（位姿、速度、IMU 零偏）
-
+        // 程序的几个阶段：
+        // 1. 初始化系统
+        // 2. IMU预积分
+        // 3. 构建因子图并进行优化
+        // 4. 提取结果并且判断结果是否合理
+        // 5. 重传播IMU预积分
 
         std::lock_guard<std::mutex> lock(mtx); // 互斥锁
 
@@ -501,21 +506,30 @@ public:
 
 
         // 2. after optiization, re-propagate imu odometry preintegration
-        prevStateOdom = prevState_;
+        // 在完成图优化后，利用最新优化得到的状态（位姿、速度、IMU 零偏），对 IMU 队列中“当前时刻之后”的 IMU 数据进行重新预积分（re-propagation），
+        // 以生成高精度的 IMU 里程计（IMU Odometry），用于后续激光帧的初始位姿预测或前端运动补偿。
+        
+        //  保存最新优化状态用于 IMU 里程计
+        // 将优化得到的imu的数据作为imu里程计下一次的初始状态，用于后续的 IMU 里程计计算。
+        prevStateOdom = prevState_; 
         prevBiasOdom  = prevBias_;
         // first pop imu message older than current correction data
         double lastImuQT = -1;
+        // 清除过期的imu的数据
         while (!imuQueImu.empty() && ROS_TIME(&imuQueImu.front()) < currentCorrectionTime - delta_t)
         {
             lastImuQT = ROS_TIME(&imuQueImu.front());
             imuQueImu.pop_front();
         }
+
+
         // repropogate
         if (!imuQueImu.empty())
         {
             // reset bias use the newly optimized bias
-            imuIntegratorImu_->resetIntegrationAndSetBias(prevBiasOdom);
+            imuIntegratorImu_->resetIntegrationAndSetBias(prevBiasOdom); // 用最新 bias 重置 IMU 里程计预积分器
             // integrate imu message from the beginning of this optimization
+            // 对 imuQueImu 中剩余的所有 IMU 数据（即 t ≥ currentCorrectionTime）进行积分
             for (int i = 0; i < (int)imuQueImu.size(); ++i)
             {
                 sensor_msgs::Imu *thisImu = &imuQueImu[i];
@@ -553,27 +567,30 @@ public:
     }
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
-    {
+    {   
+        // 获得imu的信息并且进行积分获得imu的里程计
         std::lock_guard<std::mutex> lock(mtx);
 
-        sensor_msgs::Imu thisImu = imuConverter(*imu_raw);
+        sensor_msgs::Imu thisImu = imuConverter(*imu_raw); // 转换imu信息，去掉冗余的头信息
 
-        imuQueOpt.push_back(thisImu);
+        // 将imu的信息放入到队列中
+        imuQueOpt.push_back(thisImu); 
         imuQueImu.push_back(thisImu);
 
         if (doneFirstOpt == false)
             return;
 
+        // 获得时间戳
         double imuTime = ROS_TIME(&thisImu);
-        double dt = (lastImuT_imu < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_imu);
+        double dt = (lastImuT_imu < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_imu); // 更新imu的时间
         lastImuT_imu = imuTime;
 
         // integrate this single imu message
         imuIntegratorImu_->integrateMeasurement(gtsam::Vector3(thisImu.linear_acceleration.x, thisImu.linear_acceleration.y, thisImu.linear_acceleration.z),
-                                                gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt);
+                                                gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt); // 进行imu的积分
 
         // predict odometry
-        gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom);
+        gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom); // 返回当前imu的里程计状态
 
         // publish odometry
         nav_msgs::Odometry odometry;
