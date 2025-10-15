@@ -21,6 +21,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   message_generation
   visualization_msgs
+  pcl_ros
 )
 
 find_package(OpenMP REQUIRED)
@@ -103,3 +104,7 @@ target_link_libraries(${PROJECT_NAME}_mapOptmization Boost::timer ${catkin_LIBRA
 # IMU Preintegration
 add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp)
 target_link_libraries(${PROJECT_NAME}_imuPreintegration Boost::timer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam)
+
+# livox
+add_executable(${PROJECT_NAME}_livox_to_liosam src/livox_to_liosam.cpp)
+target_link_libraries(${PROJECT_NAME}_livox_to_liosam Boost::timer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
