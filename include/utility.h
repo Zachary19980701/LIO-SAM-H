@@ -18,8 +18,7 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-// opencv 
-#include <opencv2/opencv.hpp>
+
 
 // pcl
 #include <pcl/point_cloud.h>
@@ -35,6 +34,9 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/crop_box.h> 
 #include <pcl_conversions/pcl_conversions.h>
+
+// opencv 
+#include <opencv2/opencv.hpp>
 
 // tf 
 // #include <tf/linearMath/Quaternion.h>
