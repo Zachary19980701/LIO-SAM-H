@@ -8,14 +8,14 @@
 struct smoothness_t{
   float value;
   size_t ind;
-}
+};
 
 struct by_value{
   // 对smoothness_t结构体按照value的值进行排序
   bool operator()(smoothness_t const &left, smoothness_t const &right){
     return left.value < right.value;
   }
-}
+};
 
 class FeatureExtraction : public ParamServer{
   public:
@@ -50,7 +50,7 @@ class FeatureExtraction : public ParamServer{
       pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_corner", 1);
       pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_surface", 1);
 
-      intializationValue();
+      initializationValue();
     }
 
     void initializationValue(){ 
@@ -64,7 +64,7 @@ class FeatureExtraction : public ParamServer{
       surfaceCloud.reset(new pcl::PointCloud<PointType>());
 
       cloudCurvature = new float[N_SCAN*Horizon_SCAN];
-      cloudNeighborPicked = new int[N_SCAN*Horizon_SCAN];
+      cloudNeighborPicker = new int[N_SCAN*Horizon_SCAN];
       cloudLabel = new int[N_SCAN*Horizon_SCAN];
     }
 
@@ -99,7 +99,7 @@ class FeatureExtraction : public ParamServer{
                         + cloudInfo.pointRange[i+3] + cloudInfo.pointRange[i+4]
                         + cloudInfo.pointRange[i+5]; 
         cloudCurvature[i] = diffRange * diffRange; // diffX * diffX + diffY * diffY + diffZ * diffZ;
-        cloudNeighborPicked[i] = 0;
+        cloudNeighborPicker[i] = 0;
         cloudLabel[i] = 0;
         // cloudSmoothness for sorting
         cloudSmoothness[i].value = cloudCurvature[i];
@@ -121,19 +121,19 @@ class FeatureExtraction : public ParamServer{
         if(columnDiff < 10){
           // 计算附近十个点之间的插值
           if(depth1 - depth2 > 0.3){
-            cloudNeighborPicked[i - 5] = 1;
-            cloudNeighborPicked[i - 4] = 1;
-            cloudNeighborPicked[i - 3] = 1;
-            cloudNeighborPicked[i - 2] = 1;
-            cloudNeighborPicked[i - 1] = 1;
-            cloudNeighborPicked[i] = 1;
+            cloudNeighborPicker[i - 5] = 1;
+            cloudNeighborPicker[i - 4] = 1;
+            cloudNeighborPicker[i - 3] = 1;
+            cloudNeighborPicker[i - 2] = 1;
+            cloudNeighborPicker[i - 1] = 1;
+            cloudNeighborPicker[i] = 1;
           }else if (depth2 - depth1 > 0.3) {
-            cloudNeighborPicked[i + 1] = 1;
-            cloudNeighborPicked[i + 2] = 1;
-            cloudNeighborPicked[i + 3] = 1;
-            cloudNeighborPicked[i + 4] = 1;
-            cloudNeighborPicked[i + 5] = 1;
-            cloudNeighborPicked[i + 6] = 1;
+            cloudNeighborPicker[i + 1] = 1;
+            cloudNeighborPicker[i + 2] = 1;
+            cloudNeighborPicker[i + 3] = 1;
+            cloudNeighborPicker[i + 4] = 1;
+            cloudNeighborPicker[i + 5] = 1;
+            cloudNeighborPicker[i + 6] = 1;
           }
         }
               // 计算点是否被遮挡
@@ -141,7 +141,7 @@ class FeatureExtraction : public ParamServer{
         float diff2 = std::abs(float(cloudInfo.pointRange[i+1] - cloudInfo.pointRange[i]));
 
         if (diff1 > 0.02 * cloudInfo.pointRange[i] && diff2 > 0.02 * cloudInfo.pointRange[i])
-            cloudNeighborPicked[i] = 1;
+            cloudNeighborPicker[i] = 1;
       }
     }
 
@@ -151,6 +151,10 @@ class FeatureExtraction : public ParamServer{
       // clear old clouds
       cornerCloud->clear();
       surfaceCloud->clear();
+
+      pcl::PointCloud<PointType>::Ptr surfaceCloudScan(new pcl::PointCloud<PointType>());
+      pcl::PointCloud<PointType>::Ptr surfaceCloudScanDS(new pcl::PointCloud<PointType>());
+
 
       for(int i = 0; i < N_SCAN; i++){
         // 计算角点和平面点
@@ -168,12 +172,12 @@ class FeatureExtraction : public ParamServer{
             continue;
           }
 
-          std::sort(cloudSmoothness.begin() + sp, cloudSmoothness.begin() + ep, by_value); // 按照平滑度排序
+          std::sort(cloudSmoothness.begin() + sp, cloudSmoothness.begin() + ep, by_value()); // 按照平滑度排序
 
           int largestPickedNum = 0;
           for (int k = ep; k >= sp; k--){
               int ind = cloudSmoothness[k].ind; // 获得平滑度排序后的点的索引
-              if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] > edgeThreshold) // 平滑度大于阈值，认为是角点
+              if (cloudNeighborPicker[ind] == 0 && cloudCurvature[ind] > edgeThreshold) // 平滑度大于阈值，认为是角点
               {
                   largestPickedNum++; // 角点计数
                   if (largestPickedNum <= 20){
@@ -183,7 +187,7 @@ class FeatureExtraction : public ParamServer{
                       break;
                   }
 
-                  cloudNeighborPicked[ind] = 1; // 标记相邻点为已处理,不在处理相关的邻居节点
+                  cloudNeighborPicker[ind] = 1; // 标记相邻点为已处理,不在处理相关的邻居节点
 
                   // 检查当前角点的相邻点是否属于同一条扫描线。如果相邻点的列差小于 10，继续将其标记为邻居点。
                   for (int l = 1; l <= 5; l++)
@@ -191,14 +195,14 @@ class FeatureExtraction : public ParamServer{
                       int columnDiff = std::abs(int(cloudInfo.pointColInd[ind + l] - cloudInfo.pointColInd[ind + l - 1])); // 
                       if (columnDiff > 10)
                           break;
-                      cloudNeighborPicked[ind + l] = 1;
+                      cloudNeighborPicker[ind + l] = 1;
                   }
                   for (int l = -1; l >= -5; l--)
                   {
                       int columnDiff = std::abs(int(cloudInfo.pointColInd[ind + l] - cloudInfo.pointColInd[ind + l + 1]));
                       if (columnDiff > 10)
                           break;
-                      cloudNeighborPicked[ind + l] = 1;
+                      cloudNeighborPicker[ind + l] = 1;
                   }
               }
           }
@@ -207,11 +211,11 @@ class FeatureExtraction : public ParamServer{
           for (int k = sp; k <= ep; k++)
                 {
                     int ind = cloudSmoothness[k].ind;
-                    if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] < surfThreshold)
+                    if (cloudNeighborPicker[ind] == 0 && cloudCurvature[ind] < surfThreshold)
                     {
 
                         cloudLabel[ind] = -1;
-                        cloudNeighborPicked[ind] = 1;
+                        cloudNeighborPicker[ind] = 1;
 
                         for (int l = 1; l <= 5; l++) {
 
@@ -219,7 +223,7 @@ class FeatureExtraction : public ParamServer{
                             if (columnDiff > 10)
                                 break;
 
-                            cloudNeighborPicked[ind + l] = 1;
+                            cloudNeighborPicker[ind + l] = 1;
                         }
                         for (int l = -1; l >= -5; l--) {
 
@@ -227,7 +231,7 @@ class FeatureExtraction : public ParamServer{
                             if (columnDiff > 10)
                                 break;
 
-                            cloudNeighborPicked[ind + l] = 1;
+                            cloudNeighborPicker[ind + l] = 1;
                         }
                     }
                 }
@@ -265,7 +269,7 @@ class FeatureExtraction : public ParamServer{
         // publish to mapOptimization
         pubLaserCloudInfo.publish(cloudInfo);
     }
-}
+};
 
 int main(int argc, char** argv)
 {

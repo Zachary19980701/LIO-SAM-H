@@ -21,7 +21,7 @@
 #include <gtsam/nonlinear/ISAM2.h>
 
 using namespace gtsam;
-
+using namespace std;
 // 定义优化的变量命名空间
 using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
 using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
@@ -836,7 +836,7 @@ public:
             transformTobeMapped[1] = cloudInfo.imuPitchInit;
             transformTobeMapped[2] = cloudInfo.imuYawInit;
 
-            if (!useImuHeadingInitialization)
+            if (!uesImuHeadingInitiallization)
                 transformTobeMapped[2] = 0; // 如果不使用 IMU 初始化航向角，则将 transformTobeMapped[2] 设为 0
 
             lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit); // save imu before return;

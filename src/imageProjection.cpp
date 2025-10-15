@@ -7,13 +7,13 @@ struct VelodynePointXYZIRT{
   // 存储Velodyne 16线激光雷达点的结构体
   PCL_ADD_POINT4D
   PCL_ADD_INTENSITY;
-  uint_16_t ring;
+  uint16_t ring;
   float time;
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 } EIGEN_ALIGN16; //将结构体进行对齐修正
 POINT_CLOUD_REGISTER_POINT_STRUCT (VelodynePointXYZIRT, // 解析结构体的函数
-  (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
-  (uint16_t, ring, ring) (float, time, time)
+    (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
+    (uint16_t, ring, ring) (float, time, time)
 )
 
 struct OusterPointXYZIRT {
@@ -96,10 +96,7 @@ class ImageProjection : public ParamServer{
     std::vector<int> columnIdnCountVec;
 
   public:
-    ImageProjection();
-    ~ImageProjection();
-
-
+    ImageProjection():
     // 去畸变的相关初始化
     deskewFlag(0){
       subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
@@ -153,6 +150,7 @@ class ImageProjection : public ParamServer{
 
       columnIdnCountVec.assign(N_SCAN, 0);
     }
+    ~ImageProjection(){};
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg){
       // imu处理函数
@@ -218,7 +216,7 @@ class ImageProjection : public ParamServer{
 
       if(sensor == SensorType::VELODYNE || sensor == SensorType::LIVOX){
         // 对于威力登和livox的雷达，直接进行处理
-        pcl::moveFromROSMsg(currentCloudMsg, *laserCloudMsg);
+        pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
       }
       else if(sensor == SensorType::OUSTER){
         // 对于ouster雷达，需要进行转换
@@ -300,7 +298,7 @@ class ImageProjection : public ParamServer{
 
       // 检查imu信息能够用于当前的sscan
       if(imuQueue.empty() || imuQueue.front().header.stamp.toSec() > timeScanCur || imuQueue.back().header.stamp.toSec() < timeScanEnd){
-        // 判断当前的imu的buffer的开始的时间戳和结束时间戳在当前scan的时间段内部
+        // 判断当前的imu的buffer的ImageProjection开始的时间戳和结束时间戳在当前scan的时间段内部
         ROS_DEBUG("waiting for imu data ...");
         return false;
       }
@@ -333,8 +331,8 @@ class ImageProjection : public ParamServer{
 
       // 遍历imu的队列，计算imu的旋转信息
       for(int i = 0; i < (int)imuQueue.size(); ++i){
-        sensor_msgs::Imu thisImu = imuQueue[i];
-        double currentImuTime = thisImu.header.stamp.toSec();
+        sensor_msgs::Imu thisImuMsg = imuQueue[i];
+        double currentImuTime = thisImuMsg.header.stamp.toSec();
 
         // calculate imu rotation get roll pitch yaw estimate for this scan
         if(currentImuTime <= timeScanCur){
@@ -360,7 +358,7 @@ class ImageProjection : public ParamServer{
         imuAngular2rosAngular(&thisImuMsg, &angular_x, &angular_y, &angular_z); // 将当前的imu的角速度转换到ros的格式
 
         // 旋转量进行积分
-        double timeDiff = currentImuTime - imuTime(imuPointerCur - 1);
+        double timeDiff = currentImuTime - imuTime[imuPointerCur - 1];
         imuRotX[imuPointerCur] = imuRotX[imuPointerCur - 1] + angular_x*timeDiff;
         imuRotY[imuPointerCur] = imuRotY[imuPointerCur - 1] + angular_y*timeDiff;
         imuRotZ[imuPointerCur] = imuRotZ[imuPointerCur - 1] + angular_z*timeDiff;
@@ -378,7 +376,7 @@ class ImageProjection : public ParamServer{
     }
 
     void odomDeskewInfo(){
-      cluodInfo.odomAvailable = true;
+      cloudInfo.odomAvailable = true;
 
       while(!odomQueue.empty()){
         if(odomQueue.front().header.stamp.toSec() < timeScanCur - 0.01){
@@ -417,15 +415,15 @@ class ImageProjection : public ParamServer{
       cloudInfo.initialGuessX = startOdomMsg.pose.pose.position.x;
       cloudInfo.initialGuessY = startOdomMsg.pose.pose.position.y;
       cloudInfo.initialGuessZ = startOdomMsg.pose.pose.position.z;
-      cloudInfo.odomRollInit = roll;
-      cloudInfo.odomPitchInit = pitch;
-      cloudInfo.odomYawInit = yaw;
+      cloudInfo.initialGuessRoll = roll;
+      cloudInfo.initialGuessPitch = pitch;
+      cloudInfo.initialGuessYaw = yaw;
 
       cloudInfo.odomAvailable = true;
 
       // 获得结尾时刻的odom信息
       odomDeskewFlag = false;
-      if(odom.back().header.stamp.toSec() < timeScanEnd) return;
+      if(odomQueue.back().header.stamp.toSec() < timeScanEnd) return;
 
       nav_msgs::Odometry endOdomMsg;
       for (int i = 0; i < (int)odomQueue.size(); ++i)
@@ -438,9 +436,9 @@ class ImageProjection : public ParamServer{
               break;
       }
 
-      if(int(round(startOdomMsg.pose.convariance[0])) != int(round(endOdomMsg.pose.convariance[0]))) return;
+      if(int(round(startOdomMsg.pose.covariance[0])) != int(round(endOdomMsg.pose.covariance[0]))) return;
 
-      Eigen::Affine3d transBegin = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z, roll, pitch, yaw);
+      Eigen::Affine3f transBegin = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z, roll, pitch, yaw);
       
       tf::quaternionMsgToTF(endOdomMsg.pose.pose.orientation, orientation);
       tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
@@ -449,7 +447,7 @@ class ImageProjection : public ParamServer{
       Eigen::Affine3f transBt = transBegin.inverse() * transEnd; // 计算两次odom之间的变换矩阵
       
       float rollIncre, pitchIncre, yawIncre; // 计算两次odom之间的旋转量
-      pcl::getTranslationAndEulerAngles(transBt, cloudInfo.odomXIncr, cloudInfo.odomYIncr, cloudInfo.odomZIncr, rollIncre, pitchIncre, yawIncre); // 计算两次odom之间的平移量和旋转量
+      pcl::getTranslationAndEulerAngles(transBt, odomIncreX, odomIncreY, odomIncreZ, rollIncre, pitchIncre, yawIncre); // 计算两次odom之间的平移量和旋转量
 
       odomDeskewFlag = true;      
     }
@@ -522,7 +520,7 @@ class ImageProjection : public ParamServer{
       float posXCur, posYCur, posZCur;
       findPosition(relTime, &posXCur, &posYCur, &posZCur); // 根据当前点的扫描时间，找到对应的odom的平移量
 
-      if(fisrtPointFlag == true){
+      if(firstPointFlag == true){
         // 如果是第一个点，则将当前的旋转量和平移量设置为初始值
         transStartInverse = (pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur)).inverse();
         firstPointFlag = false;
@@ -631,7 +629,7 @@ class ImageProjection : public ParamServer{
         pubLaserCloudInfo.publish(cloudInfo);
     }
 
-}；
+};
 
 
 int main(int argc, char** argv)

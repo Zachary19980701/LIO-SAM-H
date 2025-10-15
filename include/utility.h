@@ -37,7 +37,8 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 // tf 
-#include <tf/linearMath/Quaternion.h>
+// #include <tf/linearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf/transform_listener.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
@@ -170,7 +171,7 @@ class ParamServer{
         nh.param<std::string>("lio_sam/odometryFrame", odometryFrame, "odom");
         nh.param<std::string>("lio_sam/mapFrame", mapFrame, "map");
 
-        nh.param<bool>("lio_sam/useImuHeadingInitialization", useImuHeadingInitialization, false);
+        nh.param<bool>("lio_sam/useImuHeadingInitialization", uesImuHeadingInitiallization, false);
         nh.param<bool>("lio_sam/useGpsElevation", useGpsElevation, false);
         nh.param<float>("lio_sam/gpsCovThreshold", gpsCovThreshold, 2.0);
         nh.param<float>("lio_sam/poseCovThreshold", poseCovThreshold, 25.0);
@@ -211,9 +212,9 @@ class ParamServer{
         nh.param<float>("lio_sam/imuGyrBiasN", imuGyrBiasN, 0.00003);
         nh.param<float>("lio_sam/imuGravity", imuGravity, 9.80511);
         nh.param<float>("lio_sam/imuRPYWeight", imuRPYWeight, 0.01);
-        nh.param<vector<double>>("lio_sam/extrinsicRot", extRotV, vector<double>());
-        nh.param<vector<double>>("lio_sam/extrinsicRPY", extRPYV, vector<double>());
-        nh.param<vector<double>>("lio_sam/extrinsicTrans", extTransV, vector<double>());
+        nh.param<std::vector<double>>("lio_sam/extrinsicRot", extRotV, std::vector<double>());
+        nh.param<std::vector<double>>("lio_sam/extrinsicRPY", extRPYV, std::vector<double>());
+        nh.param<std::vector<double>>("lio_sam/extrinsicTrans", extTransV, std::vector<double>());
 
         // 外参转换参数
         extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
@@ -257,7 +258,7 @@ class ParamServer{
     }
 
     sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in){
-      sensor_msgs::Imu imu_out = = imu_in;
+      sensor_msgs::Imu imu_out = imu_in;
       // 旋转加速度
       Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z); // 三轴角加速度
       acc = extRot * acc; // 旋转加速度
@@ -309,7 +310,7 @@ double ROS_TIME(T msg){
 
 
 template<typename T>
-void imuAcce2rosAccel(sensor_msgs::Imu* thisImuMsg, T* angular_x, T* angular_y, T* angular_z){
+void imuAngular2rosAngular(sensor_msgs::Imu* thisImuMsg, T* angular_x, T* angular_y, T* angular_z){
   *angular_x = thisImuMsg->angular_velocity.x;
   *angular_y = thisImuMsg->angular_velocity.y;
   *angular_z = thisImuMsg->angular_velocity.z;
