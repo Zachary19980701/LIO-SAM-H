@@ -259,37 +259,42 @@ public:
 
     void laserCloudInfoHandler(const lio_sam::cloud_infoConstPtr& msgIn)
     {   
-        // updateInitialGuess();              // 1. 初始化当前位姿估计
-        // extractSurroundingKeyFrames();     // 2. 构建局部地图（提取邻近关键帧）
-        // downsampleCurrentScan();           // 3. 对当前帧点云降采样
-        // scan2MapOptimization();            // 4. 扫描到地图的优化（位姿精调）
-        // saveKeyFramesAndFactor();          // 5. 保存关键帧 + 添加因子图约束
-        // correctPoses();                    // 6. 回环后全局位姿校正
-        // publishOdometry();                 // 7. 发布全局/增量里程计
-        // publishFrames();                   // 8. 发布轨迹、地图等可视化信息
+
+        // 激光雷达特征点云接受的回调函数
+        // 处理地图的主要线程
+
         // extract time stamp
+        // 获取时间戳
         timeLaserInfoStamp = msgIn->header.stamp;
         timeLaserInfoCur = msgIn->header.stamp.toSec();
 
-        // extract info and feature cloud
+        // extract info and feature cloud 获取ros消息格式中的特征点云信息
         cloudInfo = *msgIn;
         pcl::fromROSMsg(msgIn->cloud_corner,  *laserCloudCornerLast);
         pcl::fromROSMsg(msgIn->cloud_surface, *laserCloudSurfLast);
 
-        std::lock_guard<std::mutex> lock(mtx);
+        std::lock_guard<std::mutex> lock(mtx); // 线程加锁
 
-        static double timeLastProcessing = -1;
-        if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
+        static double timeLastProcessing = -1; 
+        if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval) // 进行时间的控制，避免过快处理
         {
             timeLastProcessing = timeLaserInfoCur;
 
-            updateInitialGuess();
+            // updateInitialGuess();              // 1. 初始化当前位姿估计
+            // extractSurroundingKeyFrames();     // 2. 构建局部地图（提取邻近关键帧）
+            // downsampleCurrentScan();           // 3. 对当前帧点云降采样
+            // scan2MapOptimization();            // 4. 扫描到地图的优化（位姿精调）
+            // saveKeyFramesAndFactor();          // 5. 保存关键帧 + 添加因子图约束
+            // correctPoses();                    // 6. 回环后全局位姿校正
+            // publishOdometry();                 // 7. 发布全局/增量里程计
+            // publishFrames();                   // 8. 发布轨迹、地图等可视化信息
+            updateInitialGuess(); // 初始化当前位姿估计
 
-            extractSurroundingKeyFrames();
+            extractSurroundingKeyFrames(); // 构建局部地图（提取邻近关键帧）
 
-            downsampleCurrentScan();
+            downsampleCurrentScan(); // 对当前帧点云降采样
 
-            scan2MapOptimization();
+            scan2MapOptimization(); // S2M优化
 
             saveKeyFramesAndFactor();
 
@@ -815,30 +820,37 @@ public:
 
 
     void updateInitialGuess()
-    {
+    {   
+        // 用上一帧+IMU或GPS初始化位姿
         // save current transformation before any processing
-        incrementalOdometryAffineFront = trans2Affine3f(transformTobeMapped);
+        incrementalOdometryAffineFront = trans2Affine3f(transformTobeMapped); // 保存当前的变换矩阵 transformTobeMapped 到 incrementalOdometryAffineFront，用于后续计算增量变化。
 
-        static Eigen::Affine3f lastImuTransformation;
+        static Eigen::Affine3f lastImuTransformation; // 保存上一帧的IMU的变换矩阵，用于后续计算增量变化。
+
         // initialization
+        //  如果关键帧中没有点，则直接使用IMU的初始姿态作为位姿估计。
         if (cloudKeyPoses3D->points.empty())
         {
-            transformTobeMapped[0] = cloudInfo.imuRollInit;
+            // 直接使用imu提供的初始的位姿进行初始化
+            transformTobeMapped[0] = cloudInfo.imuRollInit; 
             transformTobeMapped[1] = cloudInfo.imuPitchInit;
             transformTobeMapped[2] = cloudInfo.imuYawInit;
 
             if (!useImuHeadingInitialization)
-                transformTobeMapped[2] = 0;
+                transformTobeMapped[2] = 0; // 如果不使用 IMU 初始化航向角，则将 transformTobeMapped[2] 设为 0
 
             lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit); // save imu before return;
             return;
         }
 
+
         // use imu pre-integration estimation for pose guess
-        static bool lastImuPreTransAvailable = false;
-        static Eigen::Affine3f lastImuPreTransformation;
-        if (cloudInfo.odomAvailable == true)
-        {
+        // 使用IMU的预积分进行位姿的估计
+        static bool lastImuPreTransAvailable = false; // 置位，表示上一帧的IMU预积分变换是否可用。
+        static Eigen::Affine3f lastImuPreTransformation; // 上一帧的IMU的积分变换矩阵
+        if (cloudInfo.odomAvailable == true) // 使用里程计预积分估计姿态猜测
+        { 
+            // 可用的里程计数据时，使用里程计提供的初始猜测（位置和姿态）构建一个仿射变换 transBack
             Eigen::Affine3f transBack = pcl::getTransformation(cloudInfo.initialGuessX,    cloudInfo.initialGuessY,     cloudInfo.initialGuessZ, 
                                                                cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
             if (lastImuPreTransAvailable == false)
@@ -862,6 +874,7 @@ public:
         // use imu incremental estimation for pose guess (only rotation)
         if (cloudInfo.imuAvailable == true)
         {
+            // 有可用的 IMU 数据，则使用 IMU 提供的角度增量更新当前姿态估计(只有旋转部分)
             Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
             Eigen::Affine3f transIncre = lastImuTransformation.inverse() * transBack;
 
@@ -892,29 +905,37 @@ public:
 
     void extractNearby()
     {
+        // 构建S2M的局部的地图
+        // 从历史关键帧中提取空间上邻近当前帧的点云，拼接成一个局部地图，并降采样，供当前帧匹配使用
+        
+        // 局部地图的容器
         pcl::PointCloud<PointType>::Ptr surroundingKeyPoses(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr surroundingKeyPosesDS(new pcl::PointCloud<PointType>());
         std::vector<int> pointSearchInd;
         std::vector<float> pointSearchSqDis;
 
         // extract all the nearby key poses and downsample them
+        // 从关键帧的位置点云中找到距离当前位置最近的关键帧点云，并进行降采样
         kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D); // create kd-tree
-        kdtreeSurroundingKeyPoses->radiusSearch(cloudKeyPoses3D->back(), (double)surroundingKeyframeSearchRadius, pointSearchInd, pointSearchSqDis);
+        kdtreeSurroundingKeyPoses->radiusSearch(cloudKeyPoses3D->back(), (double)surroundingKeyframeSearchRadius, pointSearchInd, pointSearchSqDis); // 进行半径位置搜索，获得阈值范围内的点云索引
         for (int i = 0; i < (int)pointSearchInd.size(); ++i)
         {
             int id = pointSearchInd[i];
-            surroundingKeyPoses->push_back(cloudKeyPoses3D->points[id]);
+            surroundingKeyPoses->push_back(cloudKeyPoses3D->points[id]); // 将关键帧的位置放入到CloudKeyPoses中，用于后续的降采样和匹配
         }
 
+        // 对近邻关键帧的位置进行降采样，防止产生太多的关键帧数据
         downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses);
         downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
+
+         // 对关键帧的位置进行降采样之后，缺失了关键帧的点云的ID，无法使用关键帧的点云进行匹配，因此需要重新构建关键帧的点云ID
         for(auto& pt : surroundingKeyPosesDS->points)
         {
             kdtreeSurroundingKeyPoses->nearestKSearch(pt, 1, pointSearchInd, pointSearchSqDis);
             pt.intensity = cloudKeyPoses3D->points[pointSearchInd[0]].intensity;
         }
 
-        // also extract some latest key frames in case the robot rotates in one position
+        // also extract some latest key frames in case the robot rotates in one position 补充最近 10 秒内的关键帧（防原地旋转失效）
         int numPoses = cloudKeyPoses3D->size();
         for (int i = numPoses-1; i >= 0; --i)
         {
@@ -924,20 +945,27 @@ public:
                 break;
         }
 
-        extractCloud(surroundingKeyPosesDS);
+        extractCloud(surroundingKeyPosesDS); // 调用 extractCloud() 构建实际点云地图
     }
 
     void extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtract)
     {
         // fuse the map
+        // 调用 extractCloud() 构建实际局部点云地图
+
+        // 将局部地图的角点和面点进行清空
         laserCloudCornerFromMap->clear();
         laserCloudSurfFromMap->clear(); 
+
+        // 遍历选中的关键帧，构建局部点云地图
         for (int i = 0; i < (int)cloudToExtract->size(); ++i)
         {
-            if (pointDistance(cloudToExtract->points[i], cloudKeyPoses3D->back()) > surroundingKeyframeSearchRadius)
+            if (pointDistance(cloudToExtract->points[i], cloudKeyPoses3D->back()) > surroundingKeyframeSearchRadius) // 去除距离过远的关键帧的id
                 continue;
 
-            int thisKeyInd = (int)cloudToExtract->points[i].intensity;
+            int thisKeyInd = (int)cloudToExtract->points[i].intensity; // 将id拿出来
+
+            // 判断关键帧是否已经被转换过，如果已经转换过就直接使用转换后的点云数据
             if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end()) 
             {
                 // transformed cloud available
@@ -954,22 +982,23 @@ public:
             
         }
 
-        // Downsample the surrounding corner key frames (or map)
+        // Downsample the surrounding corner key frames (or map) 对角点云进行降采样
         downSizeFilterCorner.setInputCloud(laserCloudCornerFromMap);
         downSizeFilterCorner.filter(*laserCloudCornerFromMapDS);
         laserCloudCornerFromMapDSNum = laserCloudCornerFromMapDS->size();
-        // Downsample the surrounding surf key frames (or map)
+        // Downsample the surrounding surf key frames (or map)  对面点云进行降采样
         downSizeFilterSurf.setInputCloud(laserCloudSurfFromMap);
         downSizeFilterSurf.filter(*laserCloudSurfFromMapDS);
         laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
 
-        // clear map cache if too large
+        // clear map cache if too large // 避免局部地图过大
         if (laserCloudMapContainer.size() > 1000)
             laserCloudMapContainer.clear();
     }
 
     void extractSurroundingKeyFrames()
     {
+        // 构建用于当前帧 scan-to-map 优化的局部地图（local map）
         if (cloudKeyPoses3D->points.empty() == true)
             return; 
         
@@ -1312,29 +1341,31 @@ public:
 
     void scan2MapOptimization()
     {
+        // 将当前的scan与构建的局部地图进行匹配，优化位姿的估计
         if (cloudKeyPoses3D->points.empty())
             return;
 
-        if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum && laserCloudSurfLastDSNum > surfFeatureMinValidNum)
+        if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum && laserCloudSurfLastDSNum > surfFeatureMinValidNum) //判断当前的scan是否有足够的特征点，如果有的话就进行优化
         {
-            kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
+            kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS); // 将点云转化为KDTree结构，便于后续的点云匹配
             kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
 
-            for (int iterCount = 0; iterCount < 30; iterCount++)
+            for (int iterCount = 0; iterCount < 30; iterCount++) // 进行最多30次的迭代优化
             {
+                // 清空上一轮的残差和对应点
                 laserCloudOri->clear();
                 coeffSel->clear();
 
-                cornerOptimization();
-                surfOptimization();
+                cornerOptimization(); // 对角点进行优化
+                surfOptimization(); // 对平面点进行优化
 
-                combineOptimizationCoeffs();
+                combineOptimizationCoeffs(); // 将残差和对应点合并到一起
 
                 if (LMOptimization(iterCount) == true)
                     break;              
             }
 
-            transformUpdate();
+            transformUpdate(); // 进行位姿的更新
         } else {
             ROS_WARN("Not enough features! Only %d edge and %d planar features available.", laserCloudCornerLastDSNum, laserCloudSurfLastDSNum);
         }
