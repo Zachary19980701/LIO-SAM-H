@@ -1028,75 +1028,99 @@ public:
 
     void updatePointAssociateToMap()
     {
+        // 将当前待优化的位姿 transformTobeMapped（通常是一个 6 维数组）转换为一个 4×4 的齐次变换矩阵（Eigen::Affine3f），用于后续点云坐标变换。
         transPointAssociateToMap = trans2Affine3f(transformTobeMapped);
     }
 
     void cornerOptimization()
     {
-        updatePointAssociateToMap();
+        // 角点优化
+        // 有效的原始点 + 系数（la, lb, lc, ld2），用于下一步的代码的整体的结合优化工作
+        updatePointAssociateToMap(); // 进行坐标的转换
 
-        #pragma omp parallel for num_threads(numberOfCores)
-        for (int i = 0; i < laserCloudCornerLastDSNum; i++)
+        // 并行遍历当前帧所有边缘点
+        //    └─ a. 将点变换到地图坐标系
+        //    └─ b. 在局部地图中找最近的5个边缘点
+        //    └─ c. 用这5个点拟合一条直线（主方向）
+        //    └─ d. 计算当前点到该直线的距离（残差）
+        //    └─ e. 构建残差对位姿的导数（雅可比系数）
+        //    └─ f. 若约束可靠，保存点和系数
+
+
+        #pragma omp parallel for num_threads(numberOfCores) // 多核加速遍历所有的点
+        for (int i = 0; i < laserCloudCornerLastDSNum; i++) // 对当前帧的所有的边缘点进行遍历处理
         {
             PointType pointOri, pointSel, coeff;
             std::vector<int> pointSearchInd;
             std::vector<float> pointSearchSqDis;
 
-            pointOri = laserCloudCornerLastDS->points[i];
-            pointAssociateToMap(&pointOri, &pointSel);
-            kdtreeCornerFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis);
+            pointOri = laserCloudCornerLastDS->points[i]; // 雷达坐标系中的原始点
+            pointAssociateToMap(&pointOri, &pointSel); // 变换到全局地图坐标系
+            kdtreeCornerFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis); // 在局部地图中找最近的5个边缘点
 
-            cv::Mat matA1(3, 3, CV_32F, cv::Scalar::all(0));
-            cv::Mat matD1(1, 3, CV_32F, cv::Scalar::all(0));
-            cv::Mat matV1(3, 3, CV_32F, cv::Scalar::all(0));
+            // 
+            cv::Mat matA1(3, 3, CV_32F, cv::Scalar::all(0)); // 储存5个近邻点的协方差矩阵，用于计算主方向向量（直线）
+            cv::Mat matD1(1, 3, CV_32F, cv::Scalar::all(0)); // 协方差矩阵的 3 个特征值
+            cv::Mat matV1(3, 3, CV_32F, cv::Scalar::all(0)); // 对应特征值的特征向量
                     
-            if (pointSearchSqDis[4] < 1.0) {
+            if (pointSearchSqDis[4] < 1.0) { // 第 5 近的点距离 < 1 米，确保这些点密集
                 float cx = 0, cy = 0, cz = 0;
-                for (int j = 0; j < 5; j++) {
+                for (int j = 0; j < 5; j++) { // 将最近5个点的坐标求和，计算均值点 cx, cy, cz
                     cx += laserCloudCornerFromMapDS->points[pointSearchInd[j]].x;
                     cy += laserCloudCornerFromMapDS->points[pointSearchInd[j]].y;
                     cz += laserCloudCornerFromMapDS->points[pointSearchInd[j]].z;
                 }
-                cx /= 5; cy /= 5;  cz /= 5;
+                cx /= 5; cy /= 5;  cz /= 5; // 求均值，获得质心点 cx, cy, cz
 
+                // 进行主成分分析，计算协方差矩阵的特征值和特征向量
                 float a11 = 0, a12 = 0, a13 = 0, a22 = 0, a23 = 0, a33 = 0;
                 for (int j = 0; j < 5; j++) {
+                    // 去掉质心的坐标，让协方差矩阵的特征向量更容易收敛
                     float ax = laserCloudCornerFromMapDS->points[pointSearchInd[j]].x - cx;
                     float ay = laserCloudCornerFromMapDS->points[pointSearchInd[j]].y - cy;
                     float az = laserCloudCornerFromMapDS->points[pointSearchInd[j]].z - cz;
-
+                    // 累加二次项
                     a11 += ax * ax; a12 += ax * ay; a13 += ax * az;
                     a22 += ay * ay; a23 += ay * az;
                     a33 += az * az;
                 }
-                a11 /= 5; a12 /= 5; a13 /= 5; a22 /= 5; a23 /= 5; a33 /= 5;
-
+                a11 /= 5; a12 /= 5; a13 /= 5; a22 /= 5; a23 /= 5; a33 /= 5; // 获得平均的协方差
+                
+                // 将计算的协方差矩阵填充到 matA1 中，后续进行PCAP的分解
                 matA1.at<float>(0, 0) = a11; matA1.at<float>(0, 1) = a12; matA1.at<float>(0, 2) = a13;
                 matA1.at<float>(1, 0) = a12; matA1.at<float>(1, 1) = a22; matA1.at<float>(1, 2) = a23;
                 matA1.at<float>(2, 0) = a13; matA1.at<float>(2, 1) = a23; matA1.at<float>(2, 2) = a33;
 
-                cv::eigen(matA1, matD1, matV1);
+                cv::eigen(matA1, matD1, matV1); // 计算matA1的特征值和特征向量 opencv库函数
 
-                if (matD1.at<float>(0, 0) > 3 * matD1.at<float>(0, 1)) {
+                if (matD1.at<float>(0, 0) > 3 * matD1.at<float>(0, 1)) { // 判断一个特征值远大于另一个，认为是直线 这里给出一个判断阈值为3
 
+                    // 根据特征点构造两个向量
                     float x0 = pointSel.x;
                     float y0 = pointSel.y;
                     float z0 = pointSel.z;
+                    
                     float x1 = cx + 0.1 * matV1.at<float>(0, 0);
                     float y1 = cy + 0.1 * matV1.at<float>(0, 1);
                     float z1 = cz + 0.1 * matV1.at<float>(0, 2);
+
                     float x2 = cx - 0.1 * matV1.at<float>(0, 0);
                     float y2 = cy - 0.1 * matV1.at<float>(0, 1);
                     float z2 = cz - 0.1 * matV1.at<float>(0, 2);
 
+                    // Q = (x0, y0, z0)：当前帧中待匹配的角点（在地图坐标系下）
+                    // P1 = (x1, y1, z1)、P2 = (x2, y2, z2)：地图中拟合出的直线上的两个点（对称分布在质心两侧）
+                    // 目标：计算 Q 到直线 P1P2 的最短距离，以及该距离变化的方向（梯度）
                     float a012 = sqrt(((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) * ((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
                                     + ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) * ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) 
-                                    + ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)) * ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)));
+                                    + ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)) * ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))); // 使用叉积公式计算点到直线的距离
 
-                    float l12 = sqrt((x1 - x2)*(x1 - x2) + (y1 - y2)*(y1 - y2) + (z1 - z2)*(z1 - z2));
+                    float l12 = sqrt((x1 - x2)*(x1 - x2) + (y1 - y2)*(y1 - y2) + (z1 - z2)*(z1 - z2)); // l12：计算直线段 P1P2 的长度
 
+
+                    // 单位的法向量 距离向量的梯度单位 la lb lc
                     float la = ((y1 - y2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
-                              + (z1 - z2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))) / a012 / l12;
+                              + (z1 - z2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))) / a012 / l12; 
 
                     float lb = -((x1 - x2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
                                - (z1 - z2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
@@ -1104,7 +1128,7 @@ public:
                     float lc = -((x1 - x2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) 
                                + (y1 - y2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
 
-                    float ld2 = a012 / l12;
+                    float ld2 = a012 / l12; // 距离向量长度的一半，即线段 P1P2 的中点到 Q 的距离
 
                     float s = 1 - 0.9 * fabs(ld2);
 
@@ -1124,7 +1148,9 @@ public:
     }
 
     void surfOptimization()
-    {
+    {   
+        // 面点计算残差的计算
+        // 输出面点的残差的系数，用于后续的优化工作
         updatePointAssociateToMap();
 
         #pragma omp parallel for num_threads(numberOfCores)
@@ -1197,26 +1223,30 @@ public:
     void combineOptimizationCoeffs()
     {
         // combine corner coeffs
-        for (int i = 0; i < laserCloudCornerLastDSNum; ++i){
-            if (laserCloudOriCornerFlag[i] == true){
-                laserCloudOri->push_back(laserCloudOriCornerVec[i]);
-                coeffSel->push_back(coeffSelCornerVec[i]);
+        // 角点（corner）和平面点（surf）优化阶段分别计算出的有效约束（原始点 + 系数）合并到统一的容器中，供后续位姿优化器统一处理，并重置标志位以准备下一次迭代。
+        
+        
+        for (int i = 0; i < laserCloudCornerLastDSNum; ++i){ // 遍历所有的角点
+            if (laserCloudOriCornerFlag[i] == true){ // 如果角点是有效点
+                laserCloudOri->push_back(laserCloudOriCornerVec[i]); // 将原始点放入laserCloudOri容器中
+                coeffSel->push_back(coeffSelCornerVec[i]); // 将优化的系数放入coeffSel容器中
             }
         }
-        // combine surf coeffs
+        // combine surf coeffs 同理将面点也放入到对应的容器中
         for (int i = 0; i < laserCloudSurfLastDSNum; ++i){
             if (laserCloudOriSurfFlag[i] == true){
                 laserCloudOri->push_back(laserCloudOriSurfVec[i]);
                 coeffSel->push_back(coeffSelSurfVec[i]);
             }
         }
-        // reset flag for next iteration
+        // reset flag for next iteration  重置标志位，以便下一次迭代使用
         std::fill(laserCloudOriCornerFlag.begin(), laserCloudOriCornerFlag.end(), false);
         std::fill(laserCloudOriSurfFlag.begin(), laserCloudOriSurfFlag.end(), false);
     }
 
     bool LMOptimization(int iterCount)
-    {
+    {   
+        // 使用LM的方法进行优化
         // This optimization is from the original loam_velodyne by Ji Zhang, need to cope with coordinate transformation
         // lidar <- camera      ---     camera <- lidar
         // x = z                ---     x = y
