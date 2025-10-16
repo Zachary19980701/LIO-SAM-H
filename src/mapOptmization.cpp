@@ -537,16 +537,17 @@ public:
 
 
     void loopClosureThread()
-    {
+    {   
+        // 回环检测线程，用于检测闭环和闭环优化
         if (loopClosureEnableFlag == false)
             return;
 
-        ros::Rate rate(loopClosureFrequency);
+        ros::Rate rate(loopClosureFrequency); // 定时进行回环检测
         while (ros::ok())
         {
             rate.sleep();
-            performLoopClosure();
-            visualizeLoopClosure();
+            performLoopClosure(); // 执行闭环检测和优化函数
+            visualizeLoopClosure(); // 可视化闭环检测结果
         }
     }
 
@@ -564,28 +565,31 @@ public:
 
     void performLoopClosure()
     {
-        if (cloudKeyPoses3D->points.empty() == true)
+        if (cloudKeyPoses3D->points.empty() == true) // 如果没有关键帧，则不执行闭环检测
             return;
 
-        mtx.lock();
+        mtx.lock(); // 闭环检测的线程锁 复制关键帧的位姿
         *copy_cloudKeyPoses3D = *cloudKeyPoses3D;
         *copy_cloudKeyPoses6D = *cloudKeyPoses6D;
         mtx.unlock();
 
-        // find keys
+        // find keys 进行闭环关键帧的寻找
         int loopKeyCur;
         int loopKeyPre;
+        // 使用两个闭环的关键帧方法进行寻找
+        // 1. 使用外部的特征检测的方法进行寻找
+        // 2. 如果特征检测的方法失败，则使用距离的方法进行寻找
         if (detectLoopClosureExternal(&loopKeyCur, &loopKeyPre) == false)
             if (detectLoopClosureDistance(&loopKeyCur, &loopKeyPre) == false)
                 return;
 
-        // extract cloud
+        // extract cloud // 提取闭环的关键帧和紧邻帧
         pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
         {
-            loopFindNearKeyframes(cureKeyframeCloud, loopKeyCur, 0);
-            loopFindNearKeyframes(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum);
-            if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
+            loopFindNearKeyframes(cureKeyframeCloud, loopKeyCur, 0); // 对于当前帧只选取当前帧，不进行融合
+            loopFindNearKeyframes(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum);//提取指定关键帧的点云，融合其前后若干帧滑动窗口，获得更稠密、更完整的局部地图。
+            if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000) // 匹配点数量检查
                 return;
             if (pubHistoryKeyFrames.getNumSubscribers() != 0)
                 publishCloud(pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
@@ -599,7 +603,7 @@ public:
         icp.setEuclideanFitnessEpsilon(1e-6);
         icp.setRANSACIterations(0);
 
-        // Align clouds
+        // Align clouds 执行ICP进行两个点云之间的配准，获得点云之间的变换矩阵
         icp.setInputSource(cureKeyframeCloud);
         icp.setInputTarget(prevKeyframeCloud);
         pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
@@ -616,30 +620,36 @@ public:
             publishCloud(pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
         }
 
-        // Get pose transformation
+        
+        // Get pose transformation 进行闭环约束，构建图优化的边
         float x, y, z, roll, pitch, yaw;
         Eigen::Affine3f correctionLidarFrame;
         correctionLidarFrame = icp.getFinalTransformation();
-        // transform from world origin to wrong pose
+
+        // transform from world origin to wrong pose 获取原始的点云位姿
         Eigen::Affine3f tWrong = pclPointToAffine3f(copy_cloudKeyPoses6D->points[loopKeyCur]);
-        // transform from world origin to corrected pose
+        // transform from world origin to corrected pose 获取校正之后的位置T_correct = T_icp * T_wrong
         Eigen::Affine3f tCorrect = correctionLidarFrame * tWrong;// pre-multiplying -> successive rotation about a fixed frame
+        
+        // 转化为因子图进行位姿的优化
         pcl::getTranslationAndEulerAngles (tCorrect, x, y, z, roll, pitch, yaw);
         gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
         gtsam::Pose3 poseTo = pclPointTogtsamPose3(copy_cloudKeyPoses6D->points[loopKeyPre]);
+        
+        // 构建噪声模型
         gtsam::Vector Vector6(6);
         float noiseScore = icp.getFitnessScore();
         Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
         noiseModel::Diagonal::shared_ptr constraintNoise = noiseModel::Diagonal::Variances(Vector6);
 
-        // Add pose constraint
+        // Add pose constraint 将闭环的约束加入到队列中
         mtx.lock();
         loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
         loopPoseQueue.push_back(poseFrom.between(poseTo));
         loopNoiseQueue.push_back(constraintNoise);
         mtx.unlock();
 
-        // add loop constriant
+        // add loop constriant 添加闭环约束
         loopIndexContainer[loopKeyCur] = loopKeyPre;
     }
 
@@ -1588,6 +1598,7 @@ public:
 
     void saveKeyFramesAndFactor()
     {
+        // 保存关键帧
         if (saveFrame() == false)
             return;
 
@@ -1603,11 +1614,13 @@ public:
         // cout << "****************************************************" << endl;
         // gtSAMgraph.print("GTSAM Graph:\n");
 
-        // update iSAM
+        // update iSAM 使用ISAM进行增量优化
+        // 第一次 update()：传入新因子图和初始估计值。
+        // 第二次 update()：执行额外的优化迭代。
         isam->update(gtSAMgraph, initialEstimate);
         isam->update();
 
-        if (aLoopIsClosed == true)
+        if (aLoopIsClosed == true) // 闭环之后触发多次优化
         {
             isam->update();
             isam->update();
@@ -1615,7 +1628,9 @@ public:
             isam->update();
             isam->update();
         }
+        
 
+        // 清空临时图与估计
         gtSAMgraph.resize(0);
         initialEstimate.clear();
 
@@ -1624,17 +1639,19 @@ public:
         PointTypePose thisPose6D;
         Pose3 latestEstimate;
 
-        isamCurrentEstimate = isam->calculateEstimate();
+        // 获取最新优化后的位姿并保存为关键帧
+        isamCurrentEstimate = isam->calculateEstimate(); 
         latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
         // cout << "****************************************************" << endl;
         // isamCurrentEstimate.print("Current estimate: ");
-
+        
+        // 保存3D位置用于快速的检索
         thisPose3D.x = latestEstimate.translation().x();
         thisPose3D.y = latestEstimate.translation().y();
         thisPose3D.z = latestEstimate.translation().z();
         thisPose3D.intensity = cloudKeyPoses3D->size(); // this can be used as index
         cloudKeyPoses3D->push_back(thisPose3D);
-
+        // 6D位姿
         thisPose6D.x = thisPose3D.x;
         thisPose6D.y = thisPose3D.y;
         thisPose6D.z = thisPose3D.z;
@@ -1859,7 +1876,7 @@ int main(int argc, char** argv)
 
     ROS_INFO("\033[1;32m----> Map Optimization Started.\033[0m");
     
-    std::thread loopthread(&mapOptimization::loopClosureThread, &MO);
+    std::thread loopthread(&mapOptimization::loopClosureThread, &MO); // 回环检测线程
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, &MO);
 
     ros::spin();

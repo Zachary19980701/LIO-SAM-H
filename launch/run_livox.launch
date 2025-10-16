@@ -3,9 +3,9 @@
     <arg name="project" default="lio_sam"/>
     
     <!-- Parameters -->
-    <rosparam file="$(find lio_sam)/config/params.yaml" command="load" />
+    <rosparam file="$(find lio_sam)/config/params_livox.yaml" command="load" />
     <!--load livox trans node -->
-    <!-- <include file="$(find lio_sam)/launch/include/livox_trans.launch" /> -->
+    <include file="$(find lio_sam)/launch/include/livox_trans.launch" />
     <!--- LOAM -->
     <include file="$(find lio_sam)/launch/include/module_loam.launch" />
 
